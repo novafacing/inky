@@ -1,4 +1,4 @@
-use anyhow::{Context, Error, Result};
+use anyhow::{bail, ensure, Context, Error, Result};
 use num::{FromPrimitive as ConvertFromPrimitive, ToPrimitive as ConvertToPrimitive};
 use num_derive::{FromPrimitive, ToPrimitive};
 use rppal::i2c::I2c;
@@ -24,10 +24,14 @@ impl PascalString {
         self.capacity
     }
 
+    pub fn set_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity as u8 + 1;
+        self.data.reserve(capacity);
+    }
+
     pub fn set_data<I: IntoIterator<Item = u8>>(&mut self, data: I) {
-        for (i, v) in data.into_iter().enumerate() {
-            self.data[i] = v;
-        }
+        self.data.clear();
+        self.data.extend(data);
     }
 }
 
@@ -46,6 +50,7 @@ impl TryFrom<&[u8]> for PascalString {
         let mut s = Self::with_capacity(value.len().try_into()?);
         if s.capacity > 1 {
             let data = &value[1..];
+            s.set_capacity(data.len());
             s.set_data(data.to_vec());
         }
         Ok(s)
@@ -65,7 +70,7 @@ impl TryFrom<Color> for u8 {
     type Error = Error;
 
     fn try_from(value: Color) -> Result<Self> {
-        ConvertToPrimitive::to_u8(&value).context("Invalid Color value")
+        ConvertToPrimitive::to_u8(&value).context(format!("Invalid Color value {:?}", value))
     }
 }
 
@@ -73,7 +78,7 @@ impl TryFrom<u8> for Color {
     type Error = Error;
 
     fn try_from(value: u8) -> Result<Self> {
-        ConvertFromPrimitive::from_u8(value).context("Invalid Color value")
+        ConvertFromPrimitive::from_u8(value).context(format!("Invalid Color value {}", value))
     }
 }
 
@@ -86,14 +91,14 @@ impl TryFrom<PcbVariant> for u8 {
     type Error = Error;
 
     fn try_from(value: PcbVariant) -> Result<Self> {
-        ConvertToPrimitive::to_u8(&value).context("Invalid PcbVariant value")
+        ConvertToPrimitive::to_u8(&value).context(format!("Invalid PcbVariant value {:?}", value))
     }
 }
 impl TryFrom<u8> for PcbVariant {
     type Error = Error;
 
     fn try_from(value: u8) -> Result<Self> {
-        ConvertFromPrimitive::from_u8(value).context("Invalid PcbVariant value")
+        ConvertFromPrimitive::from_u8(value).context(format!("Invalid PcbVariant value {}", value))
     }
 }
 
@@ -124,7 +129,8 @@ impl TryFrom<DisplayVariant> for u8 {
     type Error = Error;
 
     fn try_from(value: DisplayVariant) -> Result<Self> {
-        ConvertToPrimitive::to_u8(&value).context("Invalid DisplayVariant value")
+        ConvertToPrimitive::to_u8(&value)
+            .context(format!("Invalid DisplayVariant value {:?}", value))
     }
 }
 
@@ -132,7 +138,8 @@ impl TryFrom<u8> for DisplayVariant {
     type Error = Error;
 
     fn try_from(value: u8) -> Result<Self> {
-        ConvertFromPrimitive::from_u8(value).context("Invalid DisplayVariant value")
+        ConvertFromPrimitive::from_u8(value)
+            .context(format!("Invalid DisplayVariant value {}", value))
     }
 }
 
@@ -166,11 +173,23 @@ impl TryFrom<&[u8]> for EEPROM {
 
     fn try_from(value: &[u8]) -> Result<Self> {
         let width = u16::from_le_bytes(value[..2].try_into()?);
+        println!("Got width: {}", width);
         let height = u16::from_le_bytes(value[2..4].try_into()?);
-        let color = Color::try_from(value[5])?;
-        let pcb_variant = PcbVariant::try_from(value[6])?;
-        let display_variant = DisplayVariant::try_from(value[7])?;
-        let eeprom_write_time = PascalString::try_from(&value[8..])?;
+        println!("Got height: {}", height);
+        let color = Color::try_from(value[4])?;
+        println!("Got color: {:?}", color);
+        let pcb_variant = PcbVariant::try_from(value[5])?;
+        println!("Got pcb variant: {:?}", pcb_variant);
+        let display_variant = DisplayVariant::try_from(value[6])?;
+        println!("Got display variant: {:?}", display_variant);
+        let eeprom_write_time_bytes = value[7..]
+            .iter()
+            .filter(|v| **v != 255)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let eeprom_write_time = PascalString::try_from(eeprom_write_time_bytes.as_slice())?;
+        println!("Got EEPROM write time: {:?}", eeprom_write_time);
 
         Ok(Self {
             width,
@@ -184,26 +203,54 @@ impl TryFrom<&[u8]> for EEPROM {
 }
 
 impl EEPROM {
+    // Address of the i2c device
     pub const ADDRESS: u16 = 0x50;
+    // Give up by default after 10 attempts to read the EEPROM
+    pub const DEFAULT_TRIES: usize = 10;
 
     pub fn try_new() -> Result<Self> {
-        let mut i2c_bus = I2c::with_bus(INKY_BUS)?;
-        i2c_bus.set_slave_address(Self::ADDRESS)?;
-        i2c_bus.block_write(0x00, &[0x00])?;
-        let mut buffer = Vec::new();
-        i2c_bus.block_read(0x00, &mut buffer)?;
-        buffer.as_slice().try_into()
+        Self::try_new_tries(Self::DEFAULT_TRIES)
+    }
+
+    pub fn try_new_tries(max_tries: usize) -> Result<Self> {
+        for _ in 0..max_tries {
+            let mut i2c_bus = I2c::with_bus(INKY_BUS)?;
+            i2c_bus.set_slave_address(Self::ADDRESS)?;
+            i2c_bus.write(&[0x00])?;
+            // sleep(Duration::from_millis(1000));
+            let buffer = &mut [0x00; 32];
+            i2c_bus.set_slave_address(Self::ADDRESS)?;
+            let read = i2c_bus.read(buffer)?;
+            ensure!(read >= 29, "Read length {} is too small", read);
+            eprintln!("Got buffer: {:?}", buffer);
+            match buffer.as_slice().try_into() {
+                Ok(eeprom) => {
+                    return Ok(eeprom);
+                }
+                Err(e) => {
+                    eprintln!("Failed to initialize eeprom, retrying: {}", e);
+                }
+            }
+        }
+
+        bail!("Failed to initialize eeprom in {} tries", max_tries);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::EEPROM;
+    // A buffer retrieved with this code:
+    // 144, 1, 44, 1, 1, 12, 3, 21, 50, 48, 50, 48, 45, 49, 48, 45, 48, 49, 32, 49, 53, 58, 53, 49, 58, 52, 51, 46, 51, 255, 255, 255
+    // A buffer retrieved with smbus2:
+    // 144, 1, 44, 1, 1, 12, 3, 21, 50, 48, 50, 48, 45, 49, 48, 45, 48, 49, 32, 49, 53, 58, 53, 49, 58, 52, 51, 46, 51
 
     #[test]
+    /// Tests that EEPROM can be initialized by reading it from the device
+    /// no specific device is tested for, because you should be able to run
+    /// this test on any device with an Inky e-ink display plugged into it.
+    /// However, only the Black wHat is tested.
     fn init_eeprom() {
-        let eeprom = EEPROM::try_new().expect("Failed to initialize eeprom");
-        eprintln!("Got eeprom: {:?}", eeprom);
-        panic!("test fail");
+        _ = EEPROM::try_new().expect("Failed to initialize eeprom");
     }
 }
