@@ -1,5 +1,10 @@
-use crate::eeprom::EEPROM;
-use anyhow::{Context, Error, Result};
+//! Control and draw to the Inky display
+
+use crate::{
+    eeprom::{DisplayVariant, EEPROM},
+    lut::LUT_BLACK,
+};
+use anyhow::{ensure, Context, Error, Result};
 use derive_builder::Builder;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive as ConvertFromPrimitive, ToPrimitive as ConvertToPrimitive};
@@ -9,97 +14,8 @@ use rppal::{
 };
 use std::{thread::sleep, time::Duration};
 
-/*
-Inky Lookup Tables.
-
-These lookup tables comprise of two sets of values.
-
-The first set of values, formatted as binary, describe the voltages applied during the six update phases:
-
-    Phase 0     Phase 1     Phase 2     Phase 3     Phase 4     Phase 5     Phase 6
-    A B C D
-0b01001000, 0b10100000, 0b00010000, 0b00010000, 0b00010011, 0b00000000, 0b00000000,  LUT0 - Black
-0b01001000, 0b10100000, 0b10000000, 0b00000000, 0b00000011, 0b00000000, 0b00000000,  LUT1 - White
-0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,  NOT USED BY HARDWARE
-0b01001000, 0b10100101, 0b00000000, 0b10111011, 0b00000000, 0b00000000, 0b00000000,  LUT3 - Yellow or Red
-0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,  LUT4 - VCOM
-
-There are seven possible phases, arranged horizontally, and only the phases with duration/repeat information
-(see below) are used during the update cycle.
-
-Each phase has four steps: A, B, C and D. Each step is represented by two binary bits and these bits can
-have one of four possible values representing the voltages to be applied. The default values follow:
-
-0b00: VSS or Ground
-0b01: VSH1 or 15V
-0b10: VSL or -15V
-0b11: VSH2 or 5.4V
-
-During each phase the Black, White and Yellow (or Red) stages are applied in turn, creating a voltage
-differential across each display pixel. This is what moves the physical ink particles in their suspension.
-
-The second set of values, formatted as hex, describe the duration of each step in a phase, and the number
-of times that phase should be repeated:
-
-    Duration                Repeat
-    A     B     C     D
-0x10, 0x04, 0x04, 0x04, 0x04,  <-- Timings for Phase 0
-0x10, 0x04, 0x04, 0x04, 0x04,  <-- Timings for Phase 1
-0x04, 0x08, 0x08, 0x10, 0x10,      etc
-0x00, 0x00, 0x00, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x00,
-
-The duration and repeat parameters allow you to take a single sequence of A, B, C and D voltage values and
-transform them into a waveform that - effectively - wiggles the ink particles into the desired position.
-
-In all of our LUT definitions we use the first and second phases to flash/pulse and clear the display to
-mitigate image retention. The flashing effect is actually the ink particles being moved from the bottom to
-the top of the display repeatedly in an attempt to reset them back into a sensible resting position.
- */
-
-pub const LUT_BLACK: &[u8] = &[
-    0b01001000, 0b10100000, 0b00010000, 0b00010000, 0b00010011, 0b00000000, 0b00000000, 0b01001000,
-    0b10100000, 0b10000000, 0b00000000, 0b00000011, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
-    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b01001000, 0b10100101, 0b00000000,
-    0b10111011, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
-    0b00000000, 0b00000000, 0b00000000, 0x10, 0x04, 0x04, 0x04, 0x04, 0x10, 0x04, 0x04, 0x04, 0x04,
-    0x04, 0x08, 0x08, 0x10, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
-
-pub const LUT_RED: &[u8] = &[
-    0b01001000, 0b10100000, 0b00010000, 0b00010000, 0b00010011, 0b00000000, 0b00000000, 0b01001000,
-    0b10100000, 0b10000000, 0b00000000, 0b00000011, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
-    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b01001000, 0b10100101, 0b00000000,
-    0b10111011, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
-    0b00000000, 0b00000000, 0b00000000, 0x40, 0x0C, 0x20, 0x0C, 0x06, 0x10, 0x08, 0x04, 0x04, 0x06,
-    0x04, 0x08, 0x08, 0x10, 0x10, 0x02, 0x02, 0x02, 0x40, 0x20, 0x02, 0x02, 0x02, 0x02, 0x02, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
-
-pub const LUT_RED_HIGHTEMP: &[u8] = &[
-    0b01001000, 0b10100000, 0b00010000, 0b00010000, 0b00010011, 0b00010000, 0b00010000, 0b01001000,
-    0b10100000, 0b10000000, 0b00000000, 0b00000011, 0b10000000, 0b10000000, 0b00000000, 0b00000000,
-    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b01001000, 0b10100101, 0b00000000,
-    0b10111011, 0b00000000, 0b01001000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
-    0b00000000, 0b00000000, 0b00000000, 0x43, 0x0A, 0x1F, 0x0A, 0x04, 0x10, 0x08, 0x04, 0x04, 0x06,
-    0x04, 0x08, 0x08, 0x10, 0x0B, 0x02, 0x04, 0x04, 0x40, 0x10, 0x06, 0x06, 0x06, 0x02, 0x02, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
-
-pub const LUT_YELLOW: &[u8] = &[
-    0b11111010, 0b10010100, 0b10001100, 0b11000000, 0b11010000, 0b00000000, 0b00000000, 0b11111010,
-    0b10010100, 0b00101100, 0b10000000, 0b11100000, 0b00000000, 0b00000000, 0b11111010, 0b00000000,
-    0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b11111010, 0b10010100, 0b11111000,
-    0b10000000, 0b01010000, 0b00000000, 0b11001100, 0b10111111, 0b01011000, 0b11111100, 0b10000000,
-    0b11010000, 0b00000000, 0b00010001, 0x40, 0x10, 0x40, 0x10, 0x08, 0x08, 0x10, 0x04, 0x04, 0x10,
-    0x08, 0x08, 0x03, 0x08, 0x20, 0x08, 0x04, 0x00, 0x00, 0x10, 0x10, 0x08, 0x08, 0x00, 0x20, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
-
 #[derive(Builder, Debug)]
+/// Packet used to write to the SPI bus with a command, data, or both
 pub struct SpiPacket {
     #[builder(setter(strip_option), default)]
     command: Option<Command>,
@@ -108,10 +24,12 @@ pub struct SpiPacket {
 }
 
 impl SpiPacket {
+    /// Retrieve the SPI command
     pub fn command(&self) -> Option<u8> {
         self.command.clone().and_then(|c| c.try_into().ok())
     }
 
+    /// Retrieve the SPI data
     pub fn data(&self) -> Vec<u8> {
         self.data.clone()
     }
@@ -119,6 +37,8 @@ impl SpiPacket {
 
 #[derive(ToPrimitive, FromPrimitive, Debug, Clone)]
 #[repr(u8)]
+/// Enumertion of Inky display SPI commands according to the Inky Python library
+/// there may be more commands, but I don't know what they are
 pub enum Command {
     DataEntryMode = 0x11, // X/Y increment
     DisplayUpdateSequence = 0x22,
@@ -146,6 +66,7 @@ pub enum Command {
 impl TryFrom<u8> for Command {
     type Error = Error;
 
+    /// Convert a primitive u8 value to a Command
     fn try_from(value: u8) -> Result<Self> {
         ConvertFromPrimitive::from_u8(value).context("Invalid value for command")
     }
@@ -154,12 +75,14 @@ impl TryFrom<u8> for Command {
 impl TryFrom<Command> for u8 {
     type Error = Error;
 
+    /// Convert a command to a primitive u8 value
     fn try_from(value: Command) -> Result<Self> {
         value.to_u8().context("Not a valid u8 value")
     }
 }
 
 #[derive(Clone, Debug)]
+/// Drawing colors, used on the `Canvas` to draw to the Inky screen
 pub enum Color {
     Red,
     Yellow,
@@ -168,6 +91,8 @@ pub enum Color {
 }
 
 impl Color {
+    /// Convert the color to u8 for packing
+    // TODO: Support additional displays
     fn as_u8(&self) -> u8 {
         if !matches!(*self, Color::Black) {
             1
@@ -184,6 +109,7 @@ pub struct Canvas {
 }
 
 impl Canvas {
+    /// Create a new drawing canvas with a width and height
     fn new(width: usize, height: usize) -> Canvas {
         Canvas {
             width,
@@ -192,22 +118,27 @@ impl Canvas {
         }
     }
 
+    /// Get the color of a given pixel
     fn get_pixel(&self, col: usize, row: usize) -> Color {
         self.pixels[col][row].clone()
     }
 
+    /// Set the color of a given pixel
     fn set_pixel(&mut self, col: usize, row: usize, color: Color) {
         self.pixels[col][row] = color;
     }
 
+    /// Get the height of the canvas
     pub fn height(&self) -> usize {
         self.height
     }
 
+    /// Get the width of the canvas
     pub fn width(&self) -> usize {
         self.width
     }
 
+    /// Bitpack the canvas into bits representing (color|no color) from colored byte pixels
     pub fn pack(&self) -> Vec<u8> {
         let mut packed: Vec<u8> = Vec::new();
         let mut bit_pos: u8 = 0;
@@ -232,14 +163,9 @@ impl Canvas {
 
 #[derive(Builder)]
 #[builder(pattern = "owned")]
+/// The main display structure, used to control the Inky screen
 pub struct Inky {
-    width: u16,
-    height: u16,
     color: Color,
-    cs_channel: u8,
-    dc_pin: u8,
-    reset_pin: u8,
-    busy_pin: u8,
     h_flip: bool,
     v_flip: bool,
     spi: Spi,
@@ -256,9 +182,13 @@ impl TryFrom<EEPROM> for Inky {
     type Error = Error;
 
     fn try_from(value: EEPROM) -> Result<Self> {
-        let mut gpio = Gpio::new()?;
+        // TODO: Support additional displays
+        ensure!(
+            matches!(value.display_variant(), DisplayVariant::What),
+            "Only the Inky wHat is supported!"
+        );
+        let gpio = Gpio::new()?;
 
-        let cs_channel = 0;
         let dc_pin = 22;
         let reset_pin = 27;
         let busy_pin = 17;
@@ -271,13 +201,7 @@ impl TryFrom<EEPROM> for Inky {
         let busy = busy.into_input();
 
         let mut inky = InkyBuilder::default()
-            .width(value.width())
-            .height(value.height())
             .color(value.color().try_into()?)
-            .cs_channel(cs_channel)
-            .dc_pin(dc_pin)
-            .reset_pin(reset_pin)
-            .busy_pin(busy_pin)
             .h_flip(false)
             .v_flip(false)
             .spi(Spi::new(
@@ -300,6 +224,7 @@ impl TryFrom<EEPROM> for Inky {
 }
 
 impl Inky {
+    /// Reset the display
     pub fn reset(&mut self) -> Result<()> {
         self.reset.set_low();
         // Sleep time from inky library
@@ -315,6 +240,7 @@ impl Inky {
         Ok(())
     }
 
+    /// Update the display to show the contents of the canvas
     pub fn update(&mut self) -> Result<()> {
         self.spi_send(
             SpiPacketBuilder::default()
@@ -442,6 +368,7 @@ impl Inky {
                 .build()?,
         )?;
 
+        // TODO: Support additional displays
         // self.spi_send(
         //     SpiPacketBuilder::default()
         //         .command(Command::SetRamXPointerStart)
@@ -491,6 +418,7 @@ impl Inky {
         Ok(())
     }
 
+    /// Wait for the display to update
     pub fn wait(&mut self) -> Result<()> {
         self.busy.set_interrupt(Trigger::FallingEdge)?;
         self.busy.poll_interrupt(false, None)?;
@@ -498,20 +426,16 @@ impl Inky {
         Ok(())
     }
 
+    /// Send a packet over the SPI bus
     pub fn spi_send(&mut self, packet: SpiPacket) -> Result<()> {
         if let Some(command) = packet.command() {
-            println!("Sending command: {:#x}", command);
             self.dc.set_low();
             self.spi.write(&[command])?;
         }
 
         if !packet.data().is_empty() {
-            if packet.data().len() < 64 {
-                println!("Data: {:?}", packet.data());
-            }
             self.dc.set_high();
             for chunk in packet.data().chunks(4096) {
-                println!("Sending data (len {})", chunk.len());
                 self.spi.write(chunk)?;
             }
         }
