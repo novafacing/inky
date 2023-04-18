@@ -2,6 +2,12 @@
 name = "inky"
 version = "0.1.0"
 edition = "2021"
+description = "Low-level driver for Pimoroni Inky wHat e-ink display for Raspberry Pi"
+license = "MIT"
+documentation = "https://docs.rs/inky"
+homepage = "https://github.com/novafacing/inky"
+repository = "https://github.com/novafacing/inky"
+
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
