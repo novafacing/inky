@@ -102,14 +102,14 @@ pub const LUT_YELLOW: &[u8] = &[
 #[derive(Builder, Debug)]
 pub struct SpiPacket {
     #[builder(setter(strip_option), default)]
-    command: Option<u8>,
+    command: Option<Command>,
     #[builder(default)]
     data: Vec<u8>,
 }
 
 impl SpiPacket {
     pub fn command(&self) -> Option<u8> {
-        self.command
+        self.command.clone().and_then(|c| c.try_into().ok())
     }
 
     pub fn data(&self) -> Vec<u8> {
@@ -117,9 +117,9 @@ impl SpiPacket {
     }
 }
 
-#[derive(ToPrimitive, FromPrimitive)]
+#[derive(ToPrimitive, FromPrimitive, Debug, Clone)]
 #[repr(u8)]
-enum Command {
+pub enum Command {
     DataEntryMode = 0x11, // X/Y increment
     DisplayUpdateSequence = 0x22,
     DummyLinePeriod = 0x3a,
@@ -169,7 +169,7 @@ pub enum Color {
 
 impl Color {
     fn as_u8(&self) -> u8 {
-        if !matches!(*self, Color::White) {
+        if !matches!(*self, Color::Black) {
             1
         } else {
             0
@@ -308,7 +308,7 @@ impl Inky {
         sleep(Duration::from_millis(100));
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::SoftReset.try_into()?)
+                .command(Command::SoftReset)
                 .build()?,
         )?;
         self.wait()?;
@@ -318,14 +318,14 @@ impl Inky {
     pub fn update(&mut self) -> Result<()> {
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::SetAnalogBlockControl.try_into()?)
+                .command(Command::SetAnalogBlockControl)
                 .data(vec![0x54])
                 .build()?,
         )?;
 
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::SetDigitalBlockControl.try_into()?)
+                .command(Command::SetDigitalBlockControl)
                 .data(vec![0x3b])
                 .build()?,
         )?;
@@ -335,38 +335,45 @@ impl Inky {
 
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::GateSetting.try_into()?)
+                .command(Command::GateSetting)
                 .data(gate_setting_data)
                 .build()?,
         )?;
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::GateDrivingVoltage.try_into()?)
+                .command(Command::GateDrivingVoltage)
                 .data(vec![0x17])
+                .build()?,
+        )?;
+
+        self.spi_send(
+            SpiPacketBuilder::default()
+                .command(Command::SourceDrivingVoltage)
+                .data(vec![0x41, 0xAC, 0x32])
                 .build()?,
         )?;
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::DummyLinePeriod.try_into()?)
+                .command(Command::DummyLinePeriod)
                 .data(vec![0x07])
                 .build()?,
         )?;
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::GateLineWidth.try_into()?)
+                .command(Command::GateLineWidth)
                 .data(vec![0x04])
                 .build()?,
         )?;
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::DataEntryMode.try_into()?)
+                .command(Command::DataEntryMode)
                 .data(vec![0x03])
                 .build()?,
         )?;
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::GSTransition.try_into()?)
-                .data(vec![0x00])
+                .command(Command::VComRegister)
+                .data(vec![0x3c])
                 .build()?,
         )?;
 
@@ -381,22 +388,22 @@ impl Inky {
         //     self._send_command(0x3c, 0b00110001)  # GS Transition Define A + VSH2 + LUT1
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::GSTransition.try_into()?)
+                .command(Command::GSTransition)
                 .data(vec![0b00110001])
                 .build()?,
         )?;
 
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::SetLUT.try_into()?)
+                .command(Command::SetLUT)
                 .data(LUT_BLACK.to_vec())
                 .build()?,
         )?;
 
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::SetRamXStartEnd.try_into()?)
-                .data(vec![0x00, (self.canvas.height() as u8 / 8) - 1])
+                .command(Command::SetRamXStartEnd)
+                .data(vec![0x00, ((self.canvas.width() / 8) - 1) as u8])
                 .build()?,
         )?;
 
@@ -405,74 +412,78 @@ impl Inky {
 
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::SetRamYStartEnd.try_into()?)
+                .command(Command::SetRamYStartEnd)
                 .data(data)
                 .build()?,
         )?;
 
         let bw_buf = self.canvas.pack();
-        let ry_buf = vec![0; bw_buf.len()];
+        // 0 because nothing == RED
+        // let ry_buf = vec![0; bw_buf.len()];
 
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::SetRamXPointerStart.try_into()?)
+                .command(Command::SetRamXPointerStart)
                 .data(vec![0x00])
                 .build()?,
         )?;
 
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::SetRamYPointerStart.try_into()?)
+                .command(Command::SetRamYPointerStart)
                 .data(vec![0x00, 0x00])
                 .build()?,
         )?;
 
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::SetBWBuffer.try_into()?)
+                .command(Command::SetBWBuffer)
                 .data(bw_buf)
                 .build()?,
         )?;
 
-        self.spi_send(
-            SpiPacketBuilder::default()
-                .command(Command::SetRamXPointerStart.try_into()?)
-                .data(vec![0x00])
-                .build()?,
-        )?;
+        // self.spi_send(
+        //     SpiPacketBuilder::default()
+        //         .command(Command::SetRamXPointerStart)
+        //         .data(vec![0x00])
+        //         .build()?,
+        // )?;
+
+        // self.spi_send(
+        //     SpiPacketBuilder::default()
+        //         .command(Command::SetRamYPointerStart)
+        //         .data(vec![0x00, 0x00])
+        //         .build()?,
+        // )?;
+
+        // self.spi_send(
+        //     SpiPacketBuilder::default()
+        //         .command(Command::SetRYBuffer)
+        //         .data(ry_buf)
+        //         .build()?,
+        // )?;
 
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::SetRamYPointerStart.try_into()?)
-                .data(vec![0x00, 0x00])
-                .build()?,
-        )?;
-
-        self.spi_send(
-            SpiPacketBuilder::default()
-                .command(Command::SetRYBuffer.try_into()?)
-                .data(ry_buf)
-                .build()?,
-        )?;
-
-        self.spi_send(
-            SpiPacketBuilder::default()
-                .command(Command::DisplayUpdateSequence.try_into()?)
+                .command(Command::DisplayUpdateSequence)
                 .data(vec![0xc7])
                 .build()?,
         )?;
 
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::TriggerDisplayUpdate.try_into()?)
+                .command(Command::TriggerDisplayUpdate)
                 .build()?,
         )?;
+
+        // Defined by inky
+        sleep(Duration::from_secs_f32(0.05));
 
         self.wait()?;
 
         self.spi_send(
             SpiPacketBuilder::default()
-                .command(Command::EnterDeepSleep.try_into()?)
+                .command(Command::EnterDeepSleep)
                 .data(vec![0x01])
                 .build()?,
         )?;
@@ -489,12 +500,15 @@ impl Inky {
 
     pub fn spi_send(&mut self, packet: SpiPacket) -> Result<()> {
         if let Some(command) = packet.command() {
-            println!("Sending command: {}", command);
+            println!("Sending command: {:#x}", command);
             self.dc.set_low();
             self.spi.write(&[command])?;
         }
 
         if !packet.data().is_empty() {
+            if packet.data().len() < 64 {
+                println!("Data: {:?}", packet.data());
+            }
             self.dc.set_high();
             for chunk in packet.data().chunks(4096) {
                 println!("Sending data (len {})", chunk.len());
