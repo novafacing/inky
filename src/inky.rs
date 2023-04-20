@@ -12,7 +12,12 @@ use rppal::{
     gpio::{Gpio, InputPin, OutputPin, Trigger},
     spi::{Bus, Mode, SlaveSelect as SecondarySelect, Spi},
 };
-use std::{thread::sleep, time::Duration};
+use std::{
+    borrow::{Borrow, BorrowMut},
+    fmt::Display,
+    thread::sleep,
+    time::Duration,
+};
 
 #[derive(Builder, Debug)]
 /// Packet used to write to the SPI bus with a command, data, or both
@@ -81,13 +86,28 @@ impl TryFrom<Command> for u8 {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 /// Drawing colors, used on the `Canvas` to draw to the Inky screen
 pub enum Color {
     Red,
     Yellow,
     Black,
     White,
+}
+
+impl Display for Color {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match *self {
+                Self::Red => "R",
+                Self::Yellow => "Y",
+                Self::Black => "B",
+                Self::White => ".",
+            }
+        )
+    }
 }
 
 impl Color {
@@ -99,6 +119,114 @@ impl Color {
         } else {
             0
         }
+    }
+}
+
+impl From<u8> for Color {
+    fn from(value: u8) -> Self {
+        if value == 0 {
+            Self::Black
+        } else {
+            Self::White
+        }
+    }
+}
+
+impl From<u32> for Color {
+    fn from(value: u32) -> Self {
+        if value == 0 {
+            Self::Black
+        } else {
+            Self::White
+        }
+    }
+}
+
+pub trait Drawable {
+    fn coordinates(&self) -> Vec<(usize, usize)>;
+}
+
+pub struct Line {
+    start: (isize, isize),
+    end: (isize, isize),
+}
+
+impl Line {
+    pub fn new(start: (isize, isize), end: (isize, isize)) -> Self {
+        Self { start, end }
+    }
+
+    // Returns a vector of coordinates along the line using Bresenham's algorithm
+    fn line_coordinates(&self) -> Vec<(usize, usize)> {
+        let mut result = Vec::new();
+
+        let (mut x0, mut y0) = self.start;
+        let (x1, y1) = self.end;
+
+        let dx = x1 - x0;
+        let dy = -(y1 - y0);
+
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+
+        let mut err = dx + dy;
+
+        loop {
+            result.push((x0 as usize, y0 as usize));
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
+            }
+        }
+
+        result
+    }
+}
+
+impl Drawable for Line {
+    fn coordinates(&self) -> Vec<(usize, usize)> {
+        self.line_coordinates()
+    }
+}
+
+pub struct Rectangle {
+    top_left: (usize, usize),
+    bottom_right: (usize, usize),
+}
+
+impl Rectangle {
+    pub fn new(top_left: (usize, usize), bottom_right: (usize, usize)) -> Self {
+        Self {
+            top_left,
+            bottom_right,
+        }
+    }
+
+    // Returns a vector of coordinates inside the rectangle
+    fn rectangle_coordinates(&self) -> Vec<(usize, usize)> {
+        let mut result = Vec::new();
+
+        for row in self.top_left.0..=self.bottom_right.0 {
+            for col in self.top_left.1..=self.bottom_right.1 {
+                result.push((row, col));
+            }
+        }
+
+        result
+    }
+}
+
+impl Drawable for Rectangle {
+    fn coordinates(&self) -> Vec<(usize, usize)> {
+        self.rectangle_coordinates()
     }
 }
 
@@ -126,6 +254,12 @@ impl Canvas {
     /// Set the color of a given pixel
     fn set_pixel(&mut self, col: usize, row: usize, color: Color) {
         self.pixels[col][row] = color;
+    }
+
+    pub fn draw<D: Drawable>(&mut self, drawable: D) {
+        for (row, col) in drawable.coordinates() {
+            self.set_pixel(col, row, Color::Black);
+        }
     }
 
     /// Get the height of the canvas
@@ -244,8 +378,8 @@ impl Inky {
         &self.canvas
     }
 
-    pub fn set_image() -> Result<()> {
-        Ok(())
+    pub fn canvas_mut(&mut self) -> &mut Canvas {
+        &mut self.canvas
     }
 
     /// Update the display to show the contents of the canvas
@@ -452,9 +586,38 @@ impl Inky {
     }
 }
 
+pub struct BufferWrapper(Vec<u32>);
+
+impl Borrow<[u8]> for BufferWrapper {
+    fn borrow(&self) -> &[u8] {
+        // Safe for alignment: align_of(u8) <= align_of(u32)
+        // Safe for cast: u32 can be thought of as being transparent over [u8; 4]
+        unsafe { std::slice::from_raw_parts(self.0.as_ptr() as *const u8, self.0.len() * 4) }
+    }
+}
+impl BorrowMut<[u8]> for BufferWrapper {
+    fn borrow_mut(&mut self) -> &mut [u8] {
+        // Safe for alignment: align_of(u8) <= align_of(u32)
+        // Safe for cast: u32 can be thought of as being transparent over [u8; 4]
+        unsafe { std::slice::from_raw_parts_mut(self.0.as_mut_ptr() as *mut u8, self.0.len() * 4) }
+    }
+}
+impl Borrow<[u32]> for BufferWrapper {
+    fn borrow(&self) -> &[u32] {
+        self.0.as_slice()
+    }
+}
+impl BorrowMut<[u32]> for BufferWrapper {
+    fn borrow_mut(&mut self) -> &mut [u32] {
+        self.0.as_mut_slice()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Inky;
+    use std::borrow::{Borrow, BorrowMut};
+
+    use super::{BufferWrapper, Color, Inky, Rectangle};
     use crate::eeprom::EEPROM;
     use anyhow::Result;
 
@@ -470,11 +633,8 @@ mod tests {
     fn test_draw_box() -> Result<()> {
         let eeprom = EEPROM::try_new().expect("Failed to initialize eeprom");
         let mut inky = Inky::try_from(eeprom)?;
-        let buffer = vec![0; inky.canvas().width() * inky.canvas().height()];
-        let root = BitmapBackend::with_buffer(
-            &buffer,
-            (inky.canvas().width() as u32, inky.canvas().height() as u32),
-        )?.into_drawing_area();
+
+        inky.canvas_mut().draw(Rectangle::new((0, 0), (299, 399)));
 
         inky.update()?;
         Ok(())
