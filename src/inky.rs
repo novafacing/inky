@@ -240,6 +240,14 @@ impl Inky {
         Ok(())
     }
 
+    pub fn canvas(&self) -> &Canvas {
+        &self.canvas
+    }
+
+    pub fn set_image() -> Result<()> {
+        Ok(())
+    }
+
     /// Update the display to show the contents of the canvas
     pub fn update(&mut self) -> Result<()> {
         self.spi_send(
@@ -454,6 +462,20 @@ mod tests {
     fn test_blank() -> Result<()> {
         let eeprom = EEPROM::try_new().expect("Failed to initialize eeprom");
         let mut inky = Inky::try_from(eeprom)?;
+        inky.update()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_draw_box() -> Result<()> {
+        let eeprom = EEPROM::try_new().expect("Failed to initialize eeprom");
+        let mut inky = Inky::try_from(eeprom)?;
+        let buffer = vec![0; inky.canvas().width() * inky.canvas().height()];
+        let root = BitmapBackend::with_buffer(
+            &buffer,
+            (inky.canvas().width() as u32, inky.canvas().height() as u32),
+        )?.into_drawing_area();
+
         inky.update()?;
         Ok(())
     }
